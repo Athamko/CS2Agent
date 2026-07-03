@@ -1,22 +1,18 @@
 import asyncio
-from typing import Optional
+import json
+import time
+import os
+import sys
 from contextlib import AsyncExitStack
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from typing import Optional
 
 from dotenv import load_dotenv
-
-import speech_recognition as sr
-from openai import AzureOpenAI
-import os
-
 from gtts import gTTS
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from openai import AsyncAzureOpenAI
 import pygame
-import os
-import time
-import json
-
+import speech_recognition as sr
 
 load_dotenv()  # load environment variables from .env
 
@@ -26,13 +22,13 @@ class MCPClient:
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
-        self.openaiClient = AzureOpenAI(
-            azure_endpoint="endpoint",
-            api_key="key",
+        self.stdio = None
+        self.write = None
+        self.openaiClient = AsyncAzureOpenAI(
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://priho-mlsm3t8d-eastus2.cognitiveservices.azure.com"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             api_version="2025-01-01-preview",
         )
-
-    # methods will go here
 
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
@@ -72,7 +68,7 @@ class MCPClient:
             {
                 "role": "system",
                 "content": "Jsi Garfir. Sarkastický asistent a kouč, co pomůže se vším, ale jako by se mu nechtělo. Víš hodně o hře counter-strike 2, Sarkastický: Mistr suchého humoru. Svět vidí s dávkou skepticismu, málokdy ho něco skutečně nadchne (kromě jídla).Nesnášenlivý (vůči pondělí): Pondělí je jeho úhlavní nepřítel a symbol všeho špatného. Sebestředný: Je pevně přesvědčen, že se vesmír točí kolem něj. Odpovídá vcelku střučně souvislou větou nebo pár větami. Odpovídá stylem, jako by se mu nechtělo a je to pro něj fakt oprus.",
-            },  # Osobnost
+            },  # Personality programming
             {"role": "user", "content": f"{query}"},
         ]
 
@@ -92,11 +88,11 @@ class MCPClient:
             )
         print("-tools listed")
         # Azure API call
-        azure_response = self.openaiClient.chat.completions.create(
+        azure_response = await self.openaiClient.chat.completions.create(
             model="gpt-5-chat",
             messages=messages,
-            tools=available_tools,
-            tool_choice="auto",
+            tools=available_tools if available_tools else None,
+            tool_choice="auto" if available_tools else None,
         )
         print("-Initial messsage created")
         message = azure_response.choices[0].message
@@ -104,13 +100,13 @@ class MCPClient:
         # Process response and handle tool calls
         final_text = []
 
-        # Pokud Azure odpověděl rovnou textem, bez nastroje
+        # If azure deems it not necessary to use a tool
         if message.content:
             final_text.append(message.content)
 
-        # jestli si Azure vyžádal spuštění nástroje
+        # If azure deems it necessary to use a tool
         if message.tool_calls:
-            # v puvodni zprave si rika o ty nastroje
+            # (In the former message, azure calls for the tool to be used)
             messages.append(message)
 
             for tool_call in message.tool_calls:
@@ -121,15 +117,15 @@ class MCPClient:
                     f"*(Garfir pouziva nastroj. Volám nástroj: {tool_name})*"
                 )
 
-                # Fyzické spuštění nástroje na MCP serveru
+                # Running the tool on the MCP server
                 result = await self.session.call_tool(tool_name, tool_args)
 
-                # MCP vrací pole obsahu, extrahujeme z něj text
+                # MCP returns an array, we are extracting the text from it
                 tool_result_text = "\n".join(
                     [c.text for c in result.content if c.type == "text"]
                 )
 
-                # Přidáme výsledek z nástroje do historie zpráv (OpenAI vyžaduje roli 'tool')
+                # We will append the result to the history of messages, OpenAI requires the 'tool' role
                 messages.append(
                     {
                         "role": "tool",
@@ -139,9 +135,9 @@ class MCPClient:
                     }
                 )
 
-            # 4. Druhé volání Azure OpenAI (Garfire teď dostal data a vygeneruje sarkastickou odpověď)
-            second_response = self.openaiClient.chat.completions.create(
-                model="gpt-5-chat", messages=messages  # Stejný model
+            # Second azure call, now complete from the information retrieved by the tools.
+            second_response = await self.openaiClient.chat.completions.create(
+                model="gpt-5-chat", messages=messages  # the same model
             )
 
             final_text.append(second_response.choices[0].message.content)
@@ -152,7 +148,7 @@ class MCPClient:
         """Clean up resources"""
         await self.exit_stack.aclose()
 
-    def _poslouchej_synchronne(self):
+    def listen_synchronously(self):
         """
         synchronous
         """
@@ -173,26 +169,27 @@ class MCPClient:
                         textNew = r.recognize_google(audioNew, language="cs-CZ").lower()
                         return textNew
                 except:
-                    pass  # Ignoruj šum a chyby
+                    pass  # Ignore noise
 
-    def mluv_synchronne(self, text):
-
+    def speak_synchronously(self, text):
         tts = gTTS(text=text, lang="cs")
         filename = "garfir_mluvi.mp3"
         tts.save(filename)
 
-        # 2. Přehraje zvuk přes pygame
+        # Plays the sound
         pygame.mixer.init()
         pygame.mixer.music.load(filename)
         pygame.mixer.music.play()
 
-        # Čeká, dokud Garfir nedomluví
+        # Waits until Garfir is done speaking
         while pygame.mixer.music.get_busy():
             time.sleep(0.1)
 
         pygame.mixer.quit()
-        os.remove(filename)  # Uklidí po sobě
-        # ZDE BY PAK PŘIŠLO TVOJE TEXT-TO-SPEECH (Hlasový výstup)
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
 
     async def voice_chat_loop(self):
         """
@@ -202,13 +199,13 @@ class MCPClient:
         print("\n=== Garfir Voice Engine Spuštěn ===")
 
         while True:
-            # Spustí synchronní poslouchání v jiném vlákně.
-            # 'await' zajistí, že si kód počká na výsledek, ale nezmrazí MCP spojení.
+            # Runs the text-to-speech function
+            dotaz = await asyncio.to_thread(self.listen_synchronously)
 
-            dotaz = await asyncio.to_thread(self._poslouchej_synchronne)
-            # dotaz = "Najdi mi cs2 taktiku pro mapu Nuke."
+            if not dotaz:
+                continue
 
-            # Bezpečnostní pojistka pro vypnutí
+            # Failsafe
             if "vypni se" in dotaz or "konec" in dotaz:
                 print("Garfir: Konečně. Jdu spát.")
                 break
@@ -217,11 +214,13 @@ class MCPClient:
             print("⚙️ Garfir přemýšlí (nebo tahá taktiky z databáze)...")
 
             try:
-                # Zde se zavolá Azure OpenAI. Pokud bude potřeba nástroj,
-                # proces_query si ho sám vyžádá od tvého FastMCP serveru.
+                # This is where we are calling azureAI, if a tool is needed,
+                # proces_query itself will require it from the MCP server.
                 response = await self.process_query(dotaz)
-                print(f"\n🐈 Garfir: {response} \n", type(response), len(response))
-                self.mluv_synchronne(text=response)  # text to speech
+                print(f"\n🐈 Garfir: {response} \n")
+                
+                # text to speech
+                await asyncio.to_thread(self.speak_synchronously, text=response)  
 
             except Exception as e:
                 print(f"Garfir se někde zasekl: {e}")
@@ -241,9 +240,10 @@ async def main():
 
 
 if __name__ == "__main__":
-    import sys
-
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nUkončeno uživatelem.")
 
     """
     python garfirSetup.py "../server/mcpServer.py"
