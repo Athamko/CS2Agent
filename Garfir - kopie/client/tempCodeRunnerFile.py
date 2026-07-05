@@ -1,1 +1,0 @@
-python garfirSetup.py "../server/mcpServer.py"
